@@ -821,6 +821,7 @@
     </nav>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script>
     const TOTAL_DAYS = 30;
     const REST_SECONDS = 90;
@@ -1087,12 +1088,27 @@
       persistProgressState();
     }
 
+    function hasAnyRecordedProgress() {
+      if (!progressState) {
+        return false;
+      }
+
+      for (let day = 1; day <= TOTAL_DAYS; day += 1) {
+        const completions = progressState.completions && progressState.completions[day];
+        if (Array.isArray(completions) && completions.length > 0) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
     function loadState() {
       if (!progressState) {
         loadProgressStore();
       }
 
-      if (Number.isInteger(progressState.day)) {
+      if (hasAnyRecordedProgress() && Number.isInteger(progressState.day)) {
         currentDay = Math.max(1, Math.min(TOTAL_DAYS, progressState.day));
         return;
       }
@@ -1547,34 +1563,87 @@
     }
 
     function exportProgress() {
-      const payload = {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        state: { day: currentDay },
-        startDate: localStorage.getItem(STORAGE_START),
-        theme: localStorage.getItem(STORAGE_THEME) || getPreferredTheme(),
-        notificationsEnabled: shouldNotify(),
-        customWorkouts: progressState && progressState.customWorkouts ? progressState.customWorkouts : {},
-        customRestDays: progressState && progressState.customRestDays ? progressState.customRestDays : {},
-        customWorkoutDays: progressState && progressState.customWorkoutDays ? progressState.customWorkoutDays : {},
-        completions: {}
-      };
-
-      for (let day = 1; day <= TOTAL_DAYS; day += 1) {
-        payload.completions[day] = getCompletions(day);
+      if (!window.jspdf || !window.jspdf.jsPDF) {
+        setStatus("PDF export is unavailable right now. Please refresh and try again.");
+        return;
       }
 
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ unit: "pt", format: "a4" });
       const stamp = new Date().toISOString().slice(0, 10);
-      a.href = url;
-      a.download = `workout-progress-${stamp}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setStatus("Progress exported as JSON.");
+      const generatedAt = new Date().toLocaleString();
+
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 40;
+      const contentWidth = pageWidth - (margin * 2);
+      let y = margin;
+
+      function newPageIfNeeded(extra = 20) {
+        if (y + extra > pageHeight - margin) {
+          doc.addPage();
+          y = margin;
+        }
+      }
+
+      function writeLine(text, size = 11, gap = 16, style = "normal") {
+        newPageIfNeeded(gap + 8);
+        doc.setFont("helvetica", style);
+        doc.setFontSize(size);
+        const wrapped = doc.splitTextToSize(String(text), contentWidth);
+        doc.text(wrapped, margin, y);
+        y += Math.max(gap, wrapped.length * (size + 3));
+      }
+
+      let completedAllDays = 0;
+      let totalAllDays = 0;
+
+      for (let day = 1; day <= TOTAL_DAYS; day += 1) {
+        const workout = getWorkoutForDay(day);
+        const total = workout.exercises ? workout.exercises.length : 0;
+        const done = Math.min(getCompletions(day).length, total);
+        totalAllDays += total;
+        completedAllDays += done;
+      }
+
+      const overallPercent = percent(completedAllDays, totalAllDays);
+
+      writeLine("30-Day Workout Scheduler Progress Report", 18, 24, "bold");
+      writeLine(`Generated: ${generatedAt}`, 10, 14);
+      writeLine(`Program day: Day ${currentDay} of ${TOTAL_DAYS}`, 11, 14);
+      writeLine(`Overall progress: ${completedAllDays} / ${totalAllDays} (${overallPercent}%)`, 11, 20);
+
+      for (let day = 1; day <= TOTAL_DAYS; day += 1) {
+        const workout = getWorkoutForDay(day);
+        const completions = getCompletions(day);
+        const total = workout.exercises ? workout.exercises.length : 0;
+        const done = Math.min(completions.length, total);
+        const dayPct = percent(done, total);
+
+        writeLine(`Day ${day} - ${workout.type}`, 12, 16, "bold");
+
+        if (!workout.exercises || !workout.exercises.length) {
+          writeLine(`Rest day. ${workout.message || "Recovery only."}`, 10, 14);
+          y += 4;
+          continue;
+        }
+
+        writeLine(`Rounds: ${workout.rounds} | Completed: ${done}/${total} (${dayPct}%)`, 10, 14);
+
+        workout.exercises.forEach((exercise, index) => {
+          const checked = completions.includes(index) ? "[x]" : "[ ]";
+          writeLine(`${checked} ${exercise.name} - ${exercise.reps} per round`, 10, 13);
+        });
+
+        if (workout.message) {
+          writeLine(`Note: ${workout.message}`, 10, 13);
+        }
+
+        y += 6;
+      }
+
+      doc.save(`workout-progress-${stamp}.pdf`);
+      setStatus("Progress exported as PDF.");
     }
 
     function importProgress(file) {
